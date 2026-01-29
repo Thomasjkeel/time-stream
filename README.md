@@ -1,3 +1,8 @@
+# TODO
+* Write seperate module for intergrating RainfallQC check e.g. to open up tf.resolution
+* ...and also to allow for int type flags to be returned instead of bool expr
+
+
 ![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)
 ![Language](https://img.shields.io/github/languages/top/NERC-CEH/time-stream)
 [![tests badge](https://github.com/NERC-CEH/time-stream/actions/workflows/pipeline.yml/badge.svg)](https://github.com/NERC-CEH/time-stream/actions)
