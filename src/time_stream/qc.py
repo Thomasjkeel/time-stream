@@ -17,11 +17,13 @@ from datetime import date, datetime, time
 
 import polars as pl
 
+from rainfallqc import comparison_checks, neighbourhood_checks, timeseries_checks
 from time_stream.enums import ClosedInterval
 from time_stream.exceptions import QcError, QcUnknownOperatorError
 from time_stream.operation import Operation
 from time_stream.utils import check_columns_in_dataframe, get_date_filter
 
+RESOLUTION_TRANSLATIONS = {"PT15M": "15m", "PT1H": "1h", "P1D": "1d"}
 
 @dataclass(frozen=True)
 class QcCtx:
@@ -143,8 +145,104 @@ class ComparisonCheck(QCCheck):
         operator_expr = operator_map[self.operator]
         if self.flag_na:
             operator_expr = operator_expr | pl.col(column).is_null()
-
         return operator_expr
+
+
+@QCCheck.register
+class RainGaugeWRCheck(QCCheck):
+    """Compares values against a given value using a comparison operator."""
+
+    name = "wr_check"
+
+    def __init__(self, resolution) -> None:
+        """Initialize comparison check.
+
+        Args:
+            compare_to: The value for comparison.
+            operator: Comparison operator. One of: '>', '>=', '<', '<=', '==', '!=', 'is_in'.
+            flag_na: If True, also flag NaN/null values as failing the check. Defaults to False.
+        """
+        self.resolution = resolution
+
+    def expr(self, ctx: QcCtx, column: str) -> pl.Expr:
+        """Return the Polars expression for threshold checking."""
+        time_res = RESOLUTION_TRANSLATIONS[self.resolution] if self.resolution in RESOLUTION_TRANSLATIONS else None
+        if not time_res:
+            raise QcError(f"Time resolution of data: '{time_res}' will not work with RainGaugeWRCheck.")
+        wr_check = comparison_checks.check_exceedance_of_rainfall_world_record(ctx.df, column, time_res)
+        return pl.col(ctx.time_name).is_in(wr_check.filter(pl.col('world_record_check') > 0.0)['time'])
+
+
+@QCCheck.register
+class RainGaugeMonthlyAccumulationCheck(QCCheck):
+    """Compares values against a given value using a comparison operator."""
+
+    name = "monthly_accumulation"
+
+    def __init__(self, gauge_lat, gauge_lon, **kwargs) -> None:
+        """Initialize comparison check.
+
+        Args:
+            compare_to: The value for comparison.
+            operator: Comparison operator. One of: '>', '>=', '<', '<=', '==', '!=', 'is_in'.
+            flag_na: If True, also flag NaN/null values as failing the check. Defaults to False.
+        """
+        self.gauge_lat = gauge_lat
+        self.gauge_lon = gauge_lon
+        self.wet_day_threshold = kwargs.get('wet_day_threshold', 1.0)
+        self.accumulation_multiplying_factor: str = kwargs.get('accumulation_multiplying_factor', 2.0)
+        self.accumulation_threshold: str = kwargs.get('accumulation_threshold', None)
+
+    def expr(self, ctx: QcCtx, column: str) -> pl.Expr:
+        """Return the Polars expression for threshold checking."""
+        monthly_accumulation = timeseries_checks.check_monthly_accumulations(ctx.df, column,
+                                                                         gauge_lat=self.gauge_lat,
+                                                                         gauge_lon=self.gauge_lon,
+                                                                         wet_day_threshold=self.wet_day_threshold,
+                                                                         accumulation_multiplying_factor=self.accumulation_multiplying_factor,
+                                                                         accumulation_threshold=self.accumulation_threshold)
+        return pl.col(ctx.time_name).is_in(monthly_accumulation.filter(pl.col('monthly_accumulation') == 2.0)['time'])
+
+
+@QCCheck.register
+class RainGaugeWetNeighboursCheck(QCCheck):
+    """Compares values against a given value using a comparison operator."""
+
+    name = "check_wet_neighbours"
+
+    def __init__(self, list_of_nearest_stations, resolution, wet_threshold, min_n_neighbours, **kwargs) -> None:
+        """Initialize comparison check.
+
+        Args:
+            compare_to: The value for comparison.
+            operator: Comparison operator. One of: '>', '>=', '<', '<=', '==', '!=', 'is_in'.
+            flag_na: If True, also flag NaN/null values as failing the check. Defaults to False.
+        """
+
+        self.list_of_nearest_stations = list_of_nearest_stations
+        self.resolution = resolution
+        self.wet_threshold = wet_threshold
+        self.min_n_neighbours = min_n_neighbours
+        self.n_neighbours_ignored: str = kwargs.get('n_neighbours_ignored', 0)
+        self.hour_offset: str = kwargs.get('hour_offset', 0)
+        self.min_count: str = kwargs.get('min_count', None)
+
+    def expr(self, ctx: QcCtx, column: str) -> pl.Expr:
+        """Return the Polars expression for threshold checking."""
+        time_res = RESOLUTION_TRANSLATIONS[self.resolution] if self.resolution in RESOLUTION_TRANSLATIONS else None
+        if not time_res:
+            raise QcError(f"Time resolution of data: '{time_res}' will not work with RainGaugeWetNeighboursCheck.")
+        wet_neighbours = neighbourhood_checks.check_wet_neighbours(ctx.df, column,
+                                                                         list_of_nearest_stations=self.list_of_nearest_stations,
+                                                                         time_res=time_res,
+                                                                         wet_threshold=self.wet_threshold,
+                                                                         min_n_neighbours=self.min_n_neighbours,
+                                                                         n_neighbours_ignored=self.n_neighbours_ignored,
+                                                                         hour_offset=self.hour_offset,
+                                                                         min_count=self.min_count)
+        print(wet_neighbours[f"wet_spell_flag_{time_res}"].value_counts())
+        return pl.col(ctx.time_name).is_in(wet_neighbours.filter(pl.col(f"wet_spell_flag_{time_res}") == 3.0)['time'])
+
 
 
 @QCCheck.register
